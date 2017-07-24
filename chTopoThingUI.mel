@@ -1,0 +1,949 @@
+// Chris Havreberg 2008
+// Some functions pulled from MJPolyTools
+
+int $mappedVerts[] = {}; // array for the mapping
+int $mappedFaces[] = {}; // keep track of mapped faces
+int $mappedEdges[] = {}; // edges.
+
+int $partialFaceList[] = {}; // faces in the partial set
+
+
+string $todo[] = {}; // keeps a list of sextuples to map
+
+int $mappingComplete = 0;
+
+// with selected analogous pairs of connected edges on 2 objects),
+// return an array of vertex numbers in the second object corresponding to the standard
+// vertex numbers of the first object
+
+
+global proc int[] mapVertexIds(string $edgeList[]){
+	global int $mappedVerts[];
+	global int $mappedFaces[];
+	global int $mappedEdges[];
+	global string $todo[];
+	global int $mappingComplete;
+
+	global int $partialFaceList[];
+	
+	clear($mappedVerts);
+	clear($mappedFaces);
+	clear($mappedEdges);
+	clear($todo);
+	clear($partialFaceList);
+	
+	if (`init $edgeList`){
+//		print "results after init:\n";
+//		printResults;
+		
+		string $mapResult[] = mapVertFromCornerEdges($edgeList);
+		string $currentEdge = $mapResult[0];
+		string $currentMappedEdge = $mapResult[1];
+		string $currentFace = $mapResult[2];
+		string $currentMappedFace = $mapResult[3];
+		string $currentVert = $mapResult[4];
+		string $currentMappedVert = $mapResult[5];
+
+		// walk the rest of the polygon to map the remaining verts.
+		enqueue(
+			$currentEdge, $currentMappedEdge,
+			$currentFace, $currentMappedFace,
+			$currentVert, $currentMappedVert
+		);
+		
+		// use the main progress bar because this could be slow		
+		global string $gMainProgressBar;  // This is defined on maya startup
+		
+		string $status = "Mapping Vertex IDs...";
+
+		progressBar -edit
+			-beginProgress
+			-isInterruptable true 
+			-status $status
+			-maxValue (size($partialFaceList))
+			$gMainProgressBar;
+		for($i = 0; $i < size($todo); $i+= 6){
+			walkFace($todo[$i], $todo[$i+1], $todo[$i + 2],
+				$todo[$i + 3], $todo[$i + 4], $todo[$i + 5]
+			);
+			if(`progressBar -query -isCancelled $gMainProgressBar`){
+				break;
+			}
+			progressBar -edit -step 1 $gMainProgressBar;
+		}
+		progressBar -edit
+			-endProgress
+			$gMainProgressBar;
+			
+		$mappingComplete = 1;
+		print ("Mapping Complete. Mapped " + size($mappedVerts) + " verts.\n");
+
+		return $mappedVerts;
+	}
+}
+
+global proc printResults(){
+	global int $mappedVerts[];
+	global int $mappedFaces[];
+	global int $mappedEdges[];
+
+	print "// Vertex Mapping\n// --------------\n";
+	
+	printNumberedIntList $mappedVerts;
+	
+	print "\n// Mapped Faces\n// ------------\n";
+	
+	printNumberedIntList $mappedFaces;
+	
+	print "\n// Mapped Edges\n// ------------\n";
+	
+	printNumberedIntList $mappedEdges;
+}
+
+
+// return a sextuple 
+global proc string[] mapVertFromCornerEdges(string $edgeList[]){
+	global int $mappedVerts[];
+
+	/* map first vertex */
+	string $firstVert = `sharedVertex $edgeList[0] $edgeList[1]`;
+	string $mappedFirstVert = `sharedVertex $edgeList[2] $edgeList[3]`;
+	$mappedVerts[(int)`getIndex $firstVert`] = `getIndex $mappedFirstVert`;
+
+/*	// add the other vert from each of the first edges to the list 
+	$edge1other = otherVertOnEdge($edgeList[0], $firstVert);
+	$mappedEdge1other = otherVertOnEdge($edgeList[2], $mappedFirstVert);
+	//$mappedVerts[`getIndex $edge1other`] = `getIndex $mappedEdge1other`;
+
+	$edge2other = otherVertOnEdge($edgeList[1], $firstVert);
+	$mappedEdge2other = otherVertOnEdge($edgeList[3], $mappedFirstVert);
+	//$mappedVerts[`getIndex $edge2other`] = `getIndex $mappedEdge2other`;
+*/
+	string $currentEdge = $edgeList[0];
+	string $currentVert = $firstVert;
+	string $currentFace = `sharedFace $edgeList[0] $edgeList[1]`;
+
+	string $currentMappedEdge = $edgeList[2];
+	string $currentMappedVert = $mappedFirstVert;
+	string $currentMappedFace = `sharedFace $edgeList[2] $edgeList[3]`;
+	
+	string $resultArray[] = {
+		$currentEdge, $currentMappedEdge,
+		$currentFace, $currentMappedFace,
+		$currentVert, $currentMappedVert
+	};
+	
+	return $resultArray;
+}
+
+global proc int init(string $edgeList[]){
+	global int $mappedVerts[];
+	global int $mappedFaces[];
+	global int $mappedEdges[];
+	global string $todo[];
+	
+	clear $mappedVerts;
+	clear $mappedFaces;
+	clear $mappedEdges;
+	clear $todo;
+	
+	global int $partialFaceList[];
+	clear $partialFaceList;
+	
+	global int $mappingComplete = 0;
+	
+	/* check 1: selection size */
+	for($i = 0; $i < size($edgeList); $i++){
+		if (size($edgeList[$i]) == 0){
+			error "Please specify all 4 edges.\n";
+		}
+	}
+
+	/* check 2: equal vertex counts */
+	// find out the name of the first object
+	$object1 = numberedToken($edgeList[0],".",0);
+	$numVerts1 = `polyEvaluate -v $object1`;
+	$numEdges1 = `polyEvaluate -e $object1`;
+	$numFaces1 = `polyEvaluate -f $object1`;
+	// find out the name of the second object
+	$object2 = numberedToken($edgeList[2],".",0);
+	$numVerts2 = `polyEvaluate -v $object2`;
+	$numEdges2 = `polyEvaluate -e $object2`;
+	$numFaces2 = `polyEvaluate -f $object2`;
+	
+	for($i = 0; $i < $numVerts1[0]; $i++){
+		$mappedVerts[$i] = -1;
+	}
+	for($i = 0; $i < $numEdges1[0]; $i++){
+		$mappedEdges[$i] = -1;
+	}
+	for($i = 0; $i < $numFaces1[0]; $i++){
+		$mappedFaces[$i] = -1;
+	}
+
+    string $partialBase = `textField -q -tx tf_partialBase`;
+    if(size($partialBase) == 0){
+        $partialBase = `sets -n partialBase ($object1 + ".f[*]")`;
+        textField -e -tx $partialBase tf_partialBase;
+    }
+    
+    string $setContents[] = `sets -q $partialBase`;
+    string $baseFaces[] = `filterExpand -sm 34 $setContents`;
+    for($i = 0; $i < `size $baseFaces`; $i++){
+        $partialFaceList[$i] = `getIndex ($baseFaces[$i])`;
+    }
+    return 1;
+}
+
+global proc int checkFaces (string $face1, string $face2){
+	string $edges1[] = `face2Edge $face1`;
+	string $edges2[] = `face2Edge $face2`;
+	if(`size $edges1` != `size $edges2`){
+		print ($face1 + " does not have the same edge count as " + $face2 + "\n");
+		return 0;
+	}
+	return 1;
+}
+global proc int checkVerts (string $vert1, string $vert2){
+	string $edges1[] = `vertex2Edge $vert1`;
+	string $edges2[] = `vertex2Edge $vert2`;
+	if(`size $edges1` != `size $edges2`){
+		print ($vert1 + " does not touch the same number of edges as " + $vert2 + "\n");
+        return 0;
+	}
+	return 1;
+}
+
+// walk around the perimeter of the specified polygon,
+// starting at the specified point and going along the specified edge,
+// and update the mapping list for each point.
+// does not map starting point
+global proc walkFace(
+	string $startEdge, string $startMappedEdge,
+	string $currentFace, string $currentMappedFace,
+	string $currentVert, string $currentMappedVert
+){
+	global int $mappedVerts[];
+	global int $mappedFaces[];
+	global int $mappedEdges[];
+	
+	// make sure each face has the same number of sides, as do the verts.
+	// (each check proc will error out if there is a discrepancy)
+	if (!checkFaces($currentFace, $currentMappedFace)) return;
+	if (!checkVerts($currentVert, $currentMappedVert)) return;
+//	checkFaces($currentFace, $currentMappedFace);
+//	checkVerts($currentVert, $currentMappedVert);
+
+	string $currentEdge = $startEdge;
+	string $nextEdge;
+
+	string $currentMappedEdge = $startMappedEdge;
+	string $nextMappedEdge;
+
+	// walk around the polygon and map all the verts
+	while(($nextEdge = nextEdgeOnFace($currentEdge, $currentFace, $currentVert)) != $startEdge){
+		// take a step on the source polygon
+		$currentVert = `sharedVertex $currentEdge $nextEdge`;
+		
+		// take a step on the destination polygon
+		$nextMappedEdge = nextEdgeOnFace($currentMappedEdge, $currentMappedFace, $currentMappedVert);
+		$currentMappedVert = `sharedVertex $currentMappedEdge $nextMappedEdge`;
+		
+		// update the mapping list
+		$mappedVerts[(int)`getIndex $currentVert`] = `getIndex $currentMappedVert`;
+		$mappedEdges[(int)`getIndex $currentEdge`] = `getIndex $currentMappedEdge`;
+
+		// consider the opposite face for future mapping...
+		considerOpposite(
+			$currentEdge, $currentMappedEdge,
+			$currentFace, $currentMappedFace,
+			$currentVert, $currentMappedVert
+		);
+		
+		// prepare for next iteration
+		$currentEdge = $nextEdge;
+		$currentMappedEdge = $nextMappedEdge;
+
+	}
+	// update for the last edge and now the face is complete
+	$mappedEdges[(int)`getIndex $currentEdge`] = `getIndex $currentMappedEdge`;
+	$mappedFaces[(int)`getIndex $currentFace`] = `getIndex $currentMappedFace`;
+}
+
+global proc considerOpposite(
+	string $currentEdge, string $currentMappedEdge,
+	string $currentFace, string $currentMappedFace,
+	string $currentVert, string $currentMappedVert
+){
+	global string $todo[];
+	global int $mappedFaces[];
+	global int $partialFaceList[];
+	
+//	print ("Considering " + $currentEdge + ": ");
+	if(!IsEdgeBorder($currentEdge)){
+		string $oppositeFace = inverseFacefromEdge($currentFace, $currentEdge);
+		string $oppositeMappedFace = inverseFacefromEdge($currentMappedFace, $currentMappedEdge);
+		string $faceSet = `textField -q -tx tf_partialBase`;
+		if($mappedFaces[(int)`getIndex $oppositeFace`] == -1 && `sets -im $faceSet $oppositeFace`){
+			enqueue($currentEdge,
+				$currentMappedEdge,
+				$oppositeFace,
+				$oppositeMappedFace,
+				$currentVert,
+				$currentMappedVert
+			);
+		}
+	}
+}
+
+global proc enqueue(
+	string $currentEdge, string $currentMappedEdge,
+	string $currentFace, string $currentMappedFace,
+	string $currentVert, string $currentMappedVert
+){
+	global string $todo[];
+	$todo[size($todo)] = $currentEdge;
+	$todo[size($todo)] = $currentMappedEdge;
+	$todo[size($todo)] = $currentFace;
+	$todo[size($todo)] = $currentMappedFace;
+	$todo[size($todo)] = $currentVert;
+	$todo[size($todo)] = $currentMappedVert;
+}
+
+
+// given an edge and a vert in that edge, return the string for the other vert in the edge
+global proc string otherVertOnEdge(string $edge, string $vert){
+	string $vertList[] = `edge2Vertex $edge`;
+	if($vertList[0] == $vert){
+		return $vertList[1];
+	}
+	return $vertList[0];
+}
+
+// starting at the given vert, walk around the perimeter of the given face in the direction of the given edge and return the next edge.
+global proc string nextEdgeOnFace(string $edge, string $face, string $vert){
+	/* get edges on the face */
+	string $faceEdges[] = `face2Edge $face`;
+
+	/* get edges on the other vert */
+	$otherVertOnEdge = otherVertOnEdge($edge, $vert);
+	string $otherVertEdges[] = `vertex2Edge $otherVertOnEdge`;
+	
+	/* intersect the face edges with the vert edges */
+	$connectedEdges = ArrayIntersector($faceEdges, $otherVertEdges);
+	
+	/* grab the edge that isn't the argument edge */
+	if(size($connectedEdges) == 2){
+		if($connectedEdges[0] == $edge){
+			return $connectedEdges[1];
+		}
+		else if($connectedEdges[1] == $edge){
+			return $connectedEdges[0];
+		}
+		else error "Specified edge not found in the intersection.";
+	}
+	else {
+		error "There was a problem with the face-edge/vert-edge array intersection.";
+	}
+}
+
+// find the face that is shared by the two edges
+global proc string sharedFace(string $edge1, string $edge2){
+    print ("looking at " + $edge1 + ", " + $edge2 + "...\n");
+	string $edge1faces[] = `edge2Face $edge1`;
+	string $edge2faces[] = `edge2Face $edge2`;
+	string $faceIntersection[] = ArrayIntersector($edge1faces, $edge2faces);
+	if(size($faceIntersection) == 1){
+		return $faceIntersection[0];
+	}
+	else error "Edges not on the same face.";
+}
+
+
+// utility proc to grab a specified token, allowing wraparounds
+// e.g. 
+// `numberedToken "ab.cd.ef.gh" "." -2`
+// // result: ef
+
+global proc string numberedToken(string $stringIn, string $separator, int $tokenIndex){
+	string $buffer[] = {};
+	int $numTokens = `tokenize $stringIn $separator $buffer`;
+	while($tokenIndex < 0){
+		$tokenIndex += $numTokens;
+	}
+	return $buffer[$tokenIndex % $numTokens];
+}
+
+// given two edges, return the string for the vertex they share
+global proc string sharedVertex(string $edge1, string $edge2){
+	string $edge1verts[] = `edge2Vertex $edge1`;
+	string $edge2verts[] = `edge2Vertex $edge2`;
+
+	// find the shared vert.
+	for($i = 0; $i < 2; $i++){
+		for($j = 0; $j < 2; $j++){
+			if($edge1verts[$i] == $edge2verts[$j]){
+				return $edge1verts[$i];
+			}
+		}
+	}
+	return "";
+}	
+
+/* tokenize a string with the provided separator and return an array containing the tokens specified by the passed indices */
+global proc string[] tokenArray(string $inputString, string $separator, int $startIndex, int $endIndex){
+	string $buffer[];
+	int $numTokens = `tokenize $inputString $separator $buffer`;
+	while($startIndex < 0){
+		$startIndex += $numTokens;
+	}
+	while($endIndex < 0){
+		$endIndex += $numTokens;
+	}
+	string $resultArray[] = {};
+	for($i = $startIndex; $i <= $endIndex; $i++){
+		$resultArray[$i - $startIndex] = $buffer[$i];
+	}
+	return $resultArray;
+}
+
+// return a list of the edges connected to the specified vertex (based on MJPolyTools)
+global proc string[] vertex2Edge(string $theVertex)
+{
+	string $buffer[];
+	string $listEdge[] = `polyInfo -ve $theVertex`;
+	tokenize $theVertex "." $buffer;
+	string $ObjectName = $buffer[0];
+	int $numTokens = tokenize($listEdge[0] ,$buffer);
+
+	string $listEdgeName[];
+	for ($i=2;$i<$numTokens;$i++) // skip the first two tokens, as these are not actually edge indices
+	{
+		$listEdgeName[$i-2] = ($ObjectName + ".e["+$buffer[$i]+"]");
+	}
+	return $listEdgeName;
+}
+
+
+global proc printNumberedIntList(int $list[]){
+	for($i = 0; $i < size($list); $i++){
+		print ("["+$i+"] => "+$list[$i] + "\n");
+	}
+}
+
+
+/******************************************************************************/
+/**************************** from MJPolyTools ********************************/
+/******************************************************************************/
+
+global proc string[] face2Edge(string $theFace)
+{
+string $buffer[];
+string $listEdge[] = `polyInfo -fe $theFace`;
+tokenize $theFace "." $buffer;
+string $ObjectName = $buffer[0];
+int $nbEdge = tokenize($listEdge[0] ,$buffer);
+$nbEdge -= 2;
+string $listEdgeName[];
+for ($i=2;$i<size($buffer);$i++)
+{
+$listEdgeName[$i-2] = ($ObjectName + ".e["+$buffer[$i]+"]");
+}
+return $listEdgeName;
+}
+
+
+
+global proc string[] edge2Vertex(string $theEdge)
+{
+string $buffer[];
+string $listVertexName[];
+string $listVextex[] = `polyInfo -ev $theEdge`;
+tokenize $theEdge "." $buffer;
+string $ObjectName = $buffer[0];
+int $nbVertex = tokenize($listVextex[0] ,$buffer);
+$nbVertex -= 2;
+string $listVertexName[];
+for ($i=2;$i<4;$i++)
+{
+$listVertexName[$i-2] = ($ObjectName + ".vtx["+$buffer[$i]+"]");
+}
+return $listVertexName;
+}
+
+
+global proc int getIndex(string $Component)
+{
+string $result[];
+tokenize $Component "." $result;
+tokenize $result[1] "[" $result;
+tokenize $result[1] "]" $result;
+int $index = $result[0];
+return $index ;
+}
+
+
+global proc string[] edge2Face(string $theEdge)
+{
+string $buffer[];
+string $listFace[] = `polyInfo -ef $theEdge`;
+tokenize $theEdge "." $buffer;
+string $ObjectName = $buffer[0];
+int $nbFace = tokenize($listFace[0] ,$buffer);
+$nbFace -= 2;
+string $listFaceName[];
+for ($i=2;$i<size($buffer);$i++)
+{
+$listFaceName[$i-2] = ($ObjectName + ".f["+$buffer[$i]+"]");
+}
+return $listFaceName;
+}
+
+
+
+global proc string[] ArrayIntersector(string $array1[] ,string $array2[] )
+{
+    string $myIntersector = `stringArrayIntersector`;
+    stringArrayIntersector -edit -intersect $array1 $myIntersector;
+    stringArrayIntersector -edit -intersect $array2 $myIntersector;
+    string $result[]	= `stringArrayIntersector -query $myIntersector`;
+    stringArrayIntersector -edit -reset $myIntersector;
+    return $result;
+}
+
+
+global proc int IsEdgeBorder( string $Edge ) {
+	string $result = 0;
+	string $faces[] = edge2Face($Edge);
+	if ( size($faces) < 2 ){
+		$result = 1 ;
+	}
+	return $result ;
+}
+
+
+
+global proc string inverseFacefromEdge( string $Face, string $Edge ) {
+	string $result ;
+	string $FaceOfEdgeList[] = edge2Face($Edge);
+	if ($Face == $FaceOfEdgeList[0]  ){
+		$result = $FaceOfEdgeList[1];
+	}
+	else $result = $FaceOfEdgeList[0];
+	return $result;
+}
+
+
+/******************************************************************************/
+/******************************************************************************/
+
+
+global proc chTopoThingUI(){
+	if (`window -q -ex chTopoThingWin`){ deleteUI chTopoThingWin; }
+	
+    window -w 310 -h 280 -t "chTopoThingUI" chTopoThingWin ;
+    
+    columnLayout ;
+        
+        rowLayout -nc 4 -cw4 75 185 40 40;
+            text -l "Obj 1 Edge 1:" txObj1Edge1 ;
+            textField -tx "" -ed 1 -w 185 tfObj1Edge1 ;
+            button -l "<<<" -w 40 -c "$sel = `filterExpand -sm 32`; textField -e -tx $sel[0] tfObj1Edge1" -ann ("Load Selected.") btnObj1Edge1 ;
+            button -l " > " -w 40 -c "$selx = `textField -q -tx tfObj1Edge1`; select $selx;" -ann ("Select Loaded.") btnSelObj1Edge1 ;
+        setParent ..;
+        
+        rowLayout -nc 4 -cw4 75 185 40 40;
+            text -l "Obj 1 Edge 2:" txObj1Edge2 ;
+            textField -tx "" -ed 1 -w 185 tfObj1Edge2 ;
+            button -l "<<<" -w 40 -c "$sel = `filterExpand -sm 32`; textField -e -tx $sel[0] tfObj1Edge2" -ann ("Load Selected.") btnObj1Edge2 ;
+            button -l " > " -w 40 -c "$selx = `textField -q -tx tfObj1Edge2`; select $selx;" -ann ("Select Loaded.") btnSelObj1Edge2 ;
+        setParent ..;
+        
+        separator -h 30 -w 300;
+        rowLayout -nc 4 -cw4 75 185 40 40 -cal 1 right;
+            text -l "Obj 2 Edge 1:" txObj2Edge1 ;
+            textField -tx "" -ed 1 -w 185 tfObj2Edge1 ;
+            button -l "<<<" -w 40 -c "$sel = `filterExpand -sm 32`; textField -e -tx $sel[0] tfObj2Edge1" -ann ("Load Selected.") btnObj2Edge1 ;
+            button -l " > " -w 40 -c "$selx = `textField -q -tx tfObj2Edge1`; select $selx;" -ann ("Select Loaded.") btnSelObj2Edge1 ;
+        setParent ..;
+        
+        rowLayout -nc 4 -cw4 75 185 40 40;
+            text -l "Obj 2 Edge 2:" txObj2Edge2 ;
+            textField -tx "" -ed 1 -w 185 tfObj2Edge2 ;
+            button -l "<<<" -w 40 -c "$sel = `filterExpand -sm 32`; textField -e -tx $sel[0] tfObj2Edge2" -ann ("Load Selected.") btnObj2Edge2 ;
+            button -l " > " -w 40 -c "$selx = `textField -q -tx tfObj2Edge2`; select $selx;" -ann ("Select Loaded.") btnSelObj2Edge2 ;
+        setParent ..;
+        
+        
+        separator -h 30 -w 300;
+        rowLayout -nc 4 -cw4 75 185 40 40;
+            text -l "Partial Base:" tx_partialBase ;
+            textField -tx "" -ed 1 -w 185 tf_partialBase ;
+            button -l "<<<" -w 40 -c "setPartialBase" -ann ("Load Selected.") btn_setPartialBase ;
+            button -l " > " -w 40 -c "$selx = `textField -q -tx tf_partialBase`; select $selx;" -ann ("Select Loaded.") btnSelPartialBase ;
+        setParent ..;
+
+        separator -h 30 -w 300;
+        rowLayout -nc 1 -cw1 90 ;//105 105;
+            button -l "Map Vertex Ids" -w 90 -c "mapVertexIdsFromUI" btn_map ;
+        setParent ..;
+
+        
+        separator -h 30 -w 300;
+        rowLayout -nc 2 -cw2 75 185;
+            text -l "Inf Sub Find:" tx_InfSubFind ;
+            textField -tx "" -w 185 tf_InfSubFind ;
+        setParent ..;
+        
+        rowLayout -nc 2 -cw2 75 185;
+            text -l "Inf Sub Rep:" tx_InfSubRep ;
+            textField -tx "" -w 185 tf_InfSubRep ;
+        setParent ..;
+        rowLayout -nc 1 -cw1 90;
+            button -l "xferSubWeights" -w 90 -c "xferSubWeightsFromWin" btn_map ;
+        setParent ..;
+        
+        separator -h 30 -w 300;
+        
+        rowLayout -nc 2 -cw2 105 105;
+            button -l "Dupe 1 to Match 2" -w 105 -c "dupe1Match2" btn_dupe1match2 ;
+            button -l "Dupe 2 to Match 1" -w 105 -c "dupe2Match1" btn_dupe2match1 ;
+        setParent ..;
+        
+        rowLayout -nc 2 -cw2 105 105;
+            button -l "Snap 1 to Match 2" -w 105 -c "snap1Match2" btn_snap1match2 ;
+            button -l "Snap 2 to Match 1" -w 105 -c "snap2Match1" btn_snap2match1 ;
+        setParent ..;
+        
+        separator -h 30 -w 300;
+        rowLayout -nc 2 -cw2 105 105;
+            button -l "Save optionVar" -w 105 -c "saveOrLoadOptionVar 0" btn_saveOptionVar ;
+            button -l "Load optionVar" -w 105 -c "saveOrLoadOptionVar 1" btn_loadOptionVar ;
+        setParent ..;
+	
+    showWindow chTopoThingWin;
+}
+
+global proc saveOrLoadOptionVar(int $mode){
+    string $fields[] = {"tfObj1Edge1", "tfObj1Edge2", "tfObj2Edge1", "tfObj2Edge2", "tf_partialBase"};
+    if ($mode == 0){ // save
+        string $concat = "";
+        for ($field in $fields){
+            print ("querying field: " + $field + "\n");
+            $val = `textField -q -tx $field`;
+            $concat += ($val + ";");
+        }
+        print ("got concat: " + $concat + "\n");
+        optionVar -sv chTopoThingFields $concat;
+    }
+    else { // load
+        if (`optionVar -ex chTopoThingFields`){
+            $val = `optionVar -q chTopoThingFields`;
+            string $split[] = stringToStringArray($val, ";");
+            if (size($split) != 5){
+                error ("Invalid data in optionVar chTopoThingFields; value was '" + $val + "'");
+            }
+            for($i = 0; $i < size($fields); $i++){
+                textField -e -tx $split[$i] $fields[$i];
+            }
+        }
+        else {
+            warning "No optionVar found named chTopoThingFields.";
+        }
+    }
+}
+
+global proc setPartialBase(){
+	$sel = `filterExpand -sm 34`;
+	if(`size $sel` > 0){
+		$baseSet = `sets -n "partialBaseSet"`;
+		textField -e -tx $baseSet tf_partialBase;
+	}
+}
+
+proc getPartialBase(){
+	$sel = `ls -sl -type objectSet`;
+	if(`size $sel` > 0 && `sets -q -v $sel[0]`){
+		textField -e -tx $sel[0] tf_partialBase;
+	}
+}
+
+global proc dupe1Match2(){
+	global int $mappingComplete;
+	global int $mappedVerts[];
+	if($mappingComplete){
+		string $obj1 = numberedToken(`textField -q -tx tfObj1Edge1`, ".", 0);
+		string $obj2 = numberedToken(`textField -q -tx tfObj2Edge1`, ".", 0);
+		
+		string $dupeR[] = `duplicate -rr $obj1`;
+		string $dupe = $dupeR[0];
+		print ("Duped " + $obj1 + " as " + $dupe + "; matching to " + $obj2 + "\n");
+		for($i = 0; $i < size($mappedVerts); $i++){
+			if($mappedVerts[$i] > -1){
+				float $goal_pos[] = `pointPosition -l ($obj2 + ".vtx[" + $mappedVerts[$i] + "]")`;
+				move -ls ($goal_pos[0]) ($goal_pos[1]) ($goal_pos[2]) ($dupe + ".vtx[" + $i + "]");
+			}
+		}
+		select $dupe;
+	}
+	else {
+		error "Please perform mapping before duping to match.";
+	}
+}
+
+
+global proc dupe2Match1(){
+	global int $mappingComplete;
+	global int $mappedVerts[];
+	if($mappingComplete){
+		string $obj1 = numberedToken(`textField -q -tx tfObj1Edge1`, ".", 0);
+		string $obj2 = numberedToken(`textField -q -tx tfObj2Edge1`, ".", 0);
+		
+		string $dupeR[] = `duplicate -rr $obj2`;
+		string $dupe = $dupeR[0];
+		
+		print ("Duped " + $obj2 + " as " + $dupe + "; matching to " + $obj1 + "\n");
+		
+		$numFaces = `polyEvaluate -f $dupe`;
+		$setName = `textField -q -tx tf_partialBase`;
+		// remove the dupe faces from the partial base set
+		sets -rm $setName ($dupe + ".f[0:" + $numFaces[0]+ "]");
+		
+		for($i = 0; $i < size($mappedVerts); $i++){
+			if($mappedVerts[$i] > -1){
+				float $goal_pos[] = `pointPosition -l ($obj1 + ".vtx[" + $i + "]")`;
+				move -ls ($goal_pos[0]) ($goal_pos[1]) ($goal_pos[2]) ($dupe + ".vtx[" + $mappedVerts[$i] + "]");
+			}
+		}
+		select $dupe;
+	}
+	else {
+		error "Please perform mapping before duping to match.";
+	}
+}
+
+
+global proc snap1Match2(){
+	global int $mappingComplete;
+	global int $mappedVerts[];
+	if($mappingComplete){
+		string $obj1 = numberedToken(`textField -q -tx tfObj1Edge1`, ".", 0);
+		string $obj2 = numberedToken(`textField -q -tx tfObj2Edge1`, ".", 0);
+		
+		for($i = 0; $i < size($mappedVerts); $i++){
+			if($mappedVerts[$i] > -1){
+				float $goal_pos[] = `pointPosition -l ($obj2 + ".vtx[" + $mappedVerts[$i] + "]")`;
+				print ("moving vtx "+ $i + " to vtx " + $mappedVerts[$i] + "\n");
+				move -ls ($goal_pos[0]) ($goal_pos[1]) ($goal_pos[2]) ($obj1 + ".vtx[" + $i + "]");
+			}
+		}
+	}
+	else {
+		error "Please perform mapping before duping to match.";
+	}
+}
+
+
+global proc snap2Match1(){
+	global int $mappingComplete;
+	global int $mappedVerts[];
+	if($mappingComplete){
+		string $obj1 = numberedToken(`textField -q -tx tfObj1Edge1`, ".", 0);
+		string $obj2 = numberedToken(`textField -q -tx tfObj2Edge1`, ".", 0);
+		
+		for($i = 0; $i < size($mappedVerts); $i++){
+			if($mappedVerts[$i] > -1){
+				float $goal_pos[] = `pointPosition -l ($obj1 + ".vtx[" + $i + "]")`;
+				move -ls ($goal_pos[0]) ($goal_pos[1]) ($goal_pos[2]) ($obj2 + ".vtx[" + $mappedVerts[$i] + "]");
+			}
+		}
+	}
+	else {
+		error "Please perform mapping before duping to match.";
+	}
+}
+
+
+global proc mapVertexIdsFromUI(){
+	string $obj1edge1 = `textField -q -tx tfObj1Edge1`;
+	string $obj1edge2 = `textField -q -tx tfObj1Edge2`;
+	string $obj2edge1 = `textField -q -tx tfObj2Edge1`;
+	string $obj2edge2 = `textField -q -tx tfObj2Edge2`;
+	
+	string $edgeList[] =  {$obj1edge1, $obj1edge2, $obj2edge1, $obj2edge2};
+	mapVertexIds $edgeList;
+}
+
+
+global proc xferSubWeightsFromWin(){
+	$pat = `textField -q -tx tf_InfSubFind`;
+	$rep = `textField -q -tx tf_InfSubRep`;
+	if($pat != "" && $rep != ""){
+		xferSubWeights $pat $rep;
+	}
+	else {
+	    warning "Please specify a string to find and replace";
+	}
+}
+
+
+
+// automated weight transfer for after vertex ids have been mapped...
+
+global proc xferSubWeights(
+	string $pat,
+	string $rep
+){
+	// get mapping and object data from the chTopoThingUI window
+	global int $mappedVerts[]; // the point mapping
+	string $obj1 = numberedToken(`textField -q -tx tfObj1Edge1`, ".", 0);
+	string $obj2 = numberedToken(`textField -q -tx tfObj2Edge1`, ".", 0);
+	
+	// find the skinCluster of interest.
+	string $skcl1 = `findRelatedSkinCluster $obj1`;
+	string $skcl2 = `findRelatedSkinCluster $obj2`;
+	print ("got skcls " + $skcl1 + ", " + $skcl2 + "\n");
+	
+	// keep track of all the mapped verts
+	select -cl;
+	for($i = 0; $i < size($mappedVerts); $i++){
+		if($mappedVerts[$i] > -1){
+			select -add ($obj2 + ".vtx[" + $mappedVerts[$i] + "]");
+		}
+	}
+	$copyPoints = `ls -sl`;
+	$copyPointsExpanded = `filterExpand -sm 31`;
+	
+	// the transforms influencing the skinCluster.
+	string $transforms1[] = `skinCluster -q -inf $skcl1`;
+	string $transforms2[] = `skinCluster -q -inf $skcl2`;
+
+	print "got transforms.\n";
+	
+	// determine the source influences..
+	// slow pointwise analysis
+	// loop through each point of interest.
+	select -cl;
+	$infSet = `sets -n infSet`;
+	for($i = 0; $i < size($mappedVerts); $i++){
+		if($mappedVerts[$i] > -1){
+			$vtx = $obj1 + ".vtx[" + $i + "]";
+			print ("getting weights for "+$vtx+"\n");
+			// get the weights for this point
+			float $values[] = `skinPercent -q -v $skcl1 $vtx`;
+			for($j = 0; $j < size($values); $j++){
+				if($values[$j] != 0){
+					sets -add $infSet $transforms1[$j];
+				}
+			}
+		}
+	}
+
+	print "about to determine influence mapping.\n";
+	
+	// find the influences we care about
+	string $orderedInfs[] = `sets -q $infSet`;
+	delete $infSet;
+	
+	print "got ordered infs...\n"; print $orderedInfs; print "\n";
+	
+	// these arrays will hold the indices for influences in the influence array 
+	// for easier lookup of skin weight values in returned skin weight arrays.
+	int $transformIndices[] = {};
+	int $transformAnalogIndices[] = {};
+	
+	// determine the influence mapping
+	for($i = 0; $i < size($orderedInfs); $i++){
+		print ("i = " + $i + "\n");
+		$infName = $orderedInfs[$i];
+		print ($infName + " to ");
+		
+		// find the dst influence name from the template via substitution
+		$copyInfName = `py_sub $pat $rep $infName`;
+		
+		print ($copyInfName + "\n");
+		
+		// find the index for each of the influences
+		for($j = 0; $j < size($transforms2); $j++){
+			if($transforms1[$j] == $infName){
+				$transformIndices[$i] = $j;
+			}
+			if($transforms2[$j] == $copyInfName){
+				$transformAnalogIndices[$i] = $j;
+			}
+		}
+	}
+	
+	// first we clear all the weights on the dst points
+	skinPercent -pruneWeights 100 -normalize 0 $skcl2 $copyPoints;
+
+	// remember the skinCluster's normalize value to restore later.
+	$normValue = `getAttr ($skcl2 + ".normalizeWeights")`;
+
+	// now turn off normalization to precisely match the original weights
+	setAttr ($skcl2 + ".normalizeWeights") 0;
+
+
+	// now we do the actual weight transfer
+	
+	global string $gMainProgressBar;  // This is defined on maya startup
+	
+	string $status = "Transferring Weights...";
+	
+	progressBar -edit
+		-beginProgress
+		-isInterruptable true 
+		-status $status
+		-maxValue (size($copyPointsExpanded))
+		$gMainProgressBar;
+
+	// and copy that business...
+	// go through the mapped verts
+	for($i = 0; $i < size($mappedVerts); $i++){
+		if($mappedVerts[$i] > -1){
+			// do some string stuff to determine the source and dest verts
+			string $sourceVert = $obj1 + ".vtx[" + $i + "]";
+			string $destVert = $obj2 + ".vtx[" + $mappedVerts[$i] + "]";
+			// get an array of the skin weights on the current vert
+			float $weights[] = `skinPercent -q -v $skcl1 $sourceVert`;
+			
+			// loop through the influences to transfer the per-influence weights for this vert
+			for($j = 0; $j < size($transformIndices); $j++){
+				$command ="skinPercent -nrm 0 -tv " 
+					+($transforms2[$transformAnalogIndices[$j]])
+					+" "
+					+($weights[$transformIndices[$j]])
+					+" "+
+					$skcl2+" "
+					+$destVert;
+				eval $command;
+
+				if(`progressBar -query -isCancelled $gMainProgressBar`){
+					break;
+				}
+			}
+			// and normalize that sucker.
+			skinPercent -normalize true $skcl2 $destVert;
+			// update the display for prettiness' sake
+			refresh;
+			progressBar -edit -step 1 $gMainProgressBar;
+		}
+	}
+	progressBar -edit -endProgress $gMainProgressBar;
+	
+	// return to the initial normalization state
+	setAttr ($skcl2 + ".normalizeWeights") $normValue;
+}
+
+// use a python regular expression to modify the input string based on pattern
+// keep in mind it passes things straight through, so if you want to match the whole string
+// you'll have to specify that in your parameters (i.e. use ^ and $)
+global proc string py_sub(
+	string $pat,
+	string $rep,
+	string $in
+){
+	python "import re";
+	return python ("re.sub(r'"+$pat+"',r'"+$rep+"',r'"+$in+"')");
+}
+
